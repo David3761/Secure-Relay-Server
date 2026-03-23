@@ -48,7 +48,7 @@ func (c *Client) readPump() {
 			break
 		}
 
-		if msg.Type == "ping" || msg.Type == "disconnect" {
+		if msg.Type == "ping" || msg.Type == "disconnect" || msg.Type == "dummy" {
 			continue
 		}
 
