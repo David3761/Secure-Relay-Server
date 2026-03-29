@@ -15,6 +15,20 @@ type ChatMessage struct {
 	SenderPubKey    string `json:"sender_pub_key"`
 	RecipientPubKey string `json:"recipient_pub_key"`
 	EncryptedBlob   string `json:"encrypted_blob"`
+	GroupID         string `json:"group_id,omitempty"`
+}
+
+type GroupRecipient struct {
+	PubKey        string `json:"pub_key"`
+	EncryptedBlob string `json:"encrypted_blob"`
+}
+
+type GroupChatMessage struct {
+	Type         string           `json:"type"`
+	MessageID    string           `json:"message_id"`
+	GroupID      string           `json:"group_id"`
+	SenderPubKey string           `json:"sender_pub_key"`
+	Recipients   []GroupRecipient `json:"recipients"`
 }
 
 func main() {

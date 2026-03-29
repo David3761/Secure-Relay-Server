@@ -38,8 +38,11 @@ func ensureSchema() {
 		sender_pub_key VARCHAR(64) NOT NULL REFERENCES users(public_key),
 		recipient_pub_key VARCHAR(64) NOT NULL REFERENCES users(public_key),
 		encrypted_blob TEXT NOT NULL,
+		group_id TEXT,
 		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 	);
+
+	ALTER TABLE offline_messages ADD COLUMN IF NOT EXISTS group_id TEXT;
 
 	CREATE INDEX IF NOT EXISTS idx_recipient ON offline_messages(recipient_pub_key);
 	`
@@ -65,11 +68,16 @@ func saveOfflineMessage(msg ChatMessage) error {
 	registerUser(msg.SenderPubKey)
 	registerUser(msg.RecipientPubKey)
 
+	var groupID *string
+	if msg.GroupID != "" {
+		groupID = &msg.GroupID
+	}
+
 	query := `
-		INSERT INTO offline_messages (message_id, sender_pub_key, recipient_pub_key, encrypted_blob)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO offline_messages (message_id, sender_pub_key, recipient_pub_key, encrypted_blob, group_id)
+		VALUES ($1, $2, $3, $4, $5)
 	`
-	_, err := db.Exec(context.Background(), query, msg.MessageID, msg.SenderPubKey, msg.RecipientPubKey, msg.EncryptedBlob)
+	_, err := db.Exec(context.Background(), query, msg.MessageID, msg.SenderPubKey, msg.RecipientPubKey, msg.EncryptedBlob, groupID)
 	return err
 }
 
@@ -83,8 +91,8 @@ func getAndDeleteOfflineMessages(recipientPubKey string) ([]ChatMessage, error) 
 	defer tx.Rollback(ctx)
 
 	query := `
-		SELECT message_id, sender_pub_key, encrypted_blob 
-		FROM offline_messages 
+		SELECT message_id, sender_pub_key, encrypted_blob, group_id
+		FROM offline_messages
 		WHERE recipient_pub_key = $1
 		ORDER BY created_at ASC
 	`
@@ -100,8 +108,12 @@ func getAndDeleteOfflineMessages(recipientPubKey string) ([]ChatMessage, error) 
 		msg.Type = "message"
 		msg.RecipientPubKey = recipientPubKey
 
-		if err := rows.Scan(&msg.MessageID, &msg.SenderPubKey, &msg.EncryptedBlob); err != nil {
+		var groupID *string
+		if err := rows.Scan(&msg.MessageID, &msg.SenderPubKey, &msg.EncryptedBlob, &groupID); err != nil {
 			return nil, err
+		}
+		if groupID != nil {
+			msg.GroupID = *groupID
 		}
 		messages = append(messages, msg)
 	}

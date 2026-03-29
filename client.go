@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -13,7 +14,7 @@ const (
 	writeWait      = 10 * time.Second
 	pongWait       = 60 * time.Second
 	pingPeriod     = (pongWait * 9) / 10
-	maxMessageSize = 5120
+	maxMessageSize = 131072 // 128 KB — enough for ~180 recipients
 )
 
 var upgrader = websocket.Upgrader{
@@ -39,8 +40,7 @@ func (c *Client) readPump() {
 	c.conn.SetPongHandler(func(string) error { c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 
 	for {
-		var msg ChatMessage
-		err := c.conn.ReadJSON(&msg)
+		_, raw, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)
@@ -48,12 +48,34 @@ func (c *Client) readPump() {
 			break
 		}
 
-		if msg.Type == "ping" || msg.Type == "disconnect" || msg.Type == "dummy" {
+		var base struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &base); err != nil {
 			continue
 		}
 
-		if msg.SenderPubKey == c.pubKey {
-			c.hub.broadcast <- msg
+		switch base.Type {
+		case "ping", "disconnect", "dummy":
+			continue
+		case "group_message":
+			var gmsg GroupChatMessage
+			if err := json.Unmarshal(raw, &gmsg); err != nil {
+				log.Printf("Failed to parse group_message: %v", err)
+				continue
+			}
+			if gmsg.SenderPubKey == c.pubKey {
+				c.hub.groupBroadcast <- gmsg
+			}
+		default:
+			var msg ChatMessage
+			if err := json.Unmarshal(raw, &msg); err != nil {
+				log.Printf("Failed to parse message: %v", err)
+				continue
+			}
+			if msg.SenderPubKey == c.pubKey {
+				c.hub.broadcast <- msg
+			}
 		}
 	}
 }

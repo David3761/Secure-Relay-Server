@@ -3,18 +3,20 @@ package main
 import "log"
 
 type Hub struct {
-	clients    map[string]*Client
-	broadcast  chan ChatMessage
-	register   chan *Client
-	unregister chan *Client
+	clients        map[string]*Client
+	broadcast      chan ChatMessage
+	groupBroadcast chan GroupChatMessage
+	register       chan *Client
+	unregister     chan *Client
 }
 
 func newHub() *Hub {
 	return &Hub{
-		broadcast:  make(chan ChatMessage),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
-		clients:    make(map[string]*Client),
+		broadcast:      make(chan ChatMessage),
+		groupBroadcast: make(chan GroupChatMessage),
+		register:       make(chan *Client),
+		unregister:     make(chan *Client),
+		clients:        make(map[string]*Client),
 	}
 }
 
@@ -71,6 +73,48 @@ func (h *Hub) run() {
 						Type:      "ack",
 						MessageID: message.MessageID,
 					}
+				}
+			}
+
+		case gmsg := <-h.groupBroadcast:
+			senderClient, senderOnline := h.clients[gmsg.SenderPubKey]
+			allQueued := true
+
+			for _, recipient := range gmsg.Recipients {
+				msg := ChatMessage{
+					Type:            "message",
+					MessageID:       gmsg.MessageID,
+					GroupID:         gmsg.GroupID,
+					SenderPubKey:    gmsg.SenderPubKey,
+					RecipientPubKey: recipient.PubKey,
+					EncryptedBlob:   recipient.EncryptedBlob,
+				}
+
+				recipientClient, isOnline := h.clients[recipient.PubKey]
+				if isOnline {
+					select {
+					case recipientClient.send <- msg:
+						log.Printf("Routed group message to: %s", recipient.PubKey[:8]+"...")
+					default:
+						close(recipientClient.send)
+						delete(h.clients, recipient.PubKey)
+						if err := saveOfflineMessage(msg); err != nil {
+							log.Printf("CRITICAL: Failed to queue group message: %v", err)
+							allQueued = false
+						}
+					}
+				} else {
+					if err := saveOfflineMessage(msg); err != nil {
+						log.Printf("CRITICAL: Failed to queue group message for %s: %v", recipient.PubKey[:8]+"...", err)
+						allQueued = false
+					}
+				}
+			}
+
+			if senderOnline && allQueued {
+				senderClient.send <- ChatMessage{
+					Type:      "ack",
+					MessageID: gmsg.MessageID,
 				}
 			}
 		}
