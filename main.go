@@ -32,10 +32,9 @@ type GroupChatMessage struct {
 }
 
 func main() {
-	errEnv := godotenv.Load()
-	if errEnv != nil {
-		log.Fatal("Error loading .env file.")
-	}
+	// Load .env if present (local dev). In production, env vars are injected
+	// directly by the platform so a missing file is fine.
+	_ = godotenv.Load()
 
 	connString := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
 		os.Getenv("DB_USER"),
