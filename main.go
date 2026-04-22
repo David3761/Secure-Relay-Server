@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -33,6 +33,10 @@ type GroupChatMessage struct {
 }
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})))
+
 	_ = godotenv.Load()
 
 	connString := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
@@ -51,7 +55,7 @@ func main() {
 		ticker := time.NewTicker(time.Hour)
 		for range ticker.C {
 			if err := deleteExpiredMessages(); err != nil {
-				log.Printf("Failed to expire offline messages: %v", err)
+				slog.Error("Failed to expire offline messages", "error", err)
 			}
 		}
 	}()
@@ -63,9 +67,9 @@ func main() {
 		serveWs(hub, w, r)
 	})
 
-	log.Println("Secure Relay Server starting on :8080...")
-	err := http.ListenAndServe(":8080", nil)
-	if err != nil {
-		log.Fatal("ListenAndServe: ", err)
+	slog.Info("Secure Relay Server starting on :8080")
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		slog.Error("ListenAndServe failed", "error", err)
+		os.Exit(1)
 	}
 }

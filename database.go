@@ -2,7 +2,8 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
+	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -19,14 +20,16 @@ func initDB(connString string) {
 	var err error
 	db, err = pgxpool.New(context.Background(), connString)
 	if err != nil {
-		log.Fatalf("Unable to connect to database: %v\n", err)
+		slog.Error("Unable to connect to database", "error", err)
+		os.Exit(1)
 	}
 
 	if err := db.Ping(context.Background()); err != nil {
-		log.Fatalf("Database ping failed: %v\n", err)
+		slog.Error("Database ping failed", "error", err)
+		os.Exit(1)
 	}
 
-	log.Println("Connected to PostgreSQL successfully.")
+	slog.Info("Connected to PostgreSQL successfully")
 	ensureSchema()
 }
 
@@ -53,16 +56,17 @@ func ensureSchema() {
 	`
 	_, err := db.Exec(context.Background(), query)
 	if err != nil {
-		log.Fatalf("Failed to create schema: %v\n", err)
+		slog.Error("Failed to create schema", "error", err)
+		os.Exit(1)
 	}
-	log.Println("Database schema verified.")
+	slog.Info("Database schema verified")
 }
 
 func registerUser(pubKey string) error {
 	query := `
-		INSERT INTO users (public_key, last_seen) 
-		VALUES ($1, $2) 
-		ON CONFLICT (public_key) 
+		INSERT INTO users (public_key, last_seen)
+		VALUES ($1, $2)
+		ON CONFLICT (public_key)
 		DO UPDATE SET last_seen = EXCLUDED.last_seen;
 	`
 	_, err := db.Exec(context.Background(), query, pubKey, time.Now())
@@ -83,7 +87,7 @@ func saveOfflineMessage(msg ChatMessage) error {
 		return err
 	}
 	if count >= offlineMsgMaxCount {
-		log.Printf("Offline queue full (%d) for %s, dropping message", offlineMsgMaxCount, msg.RecipientPubKey[:8]+"...")
+		slog.Warn("Offline queue full, dropping message", "pubkey", msg.RecipientPubKey[:8]+"...", "limit", offlineMsgMaxCount)
 		return nil
 	}
 
@@ -111,7 +115,7 @@ func deleteExpiredMessages() error {
 		return err
 	}
 	if n := result.RowsAffected(); n > 0 {
-		log.Printf("Expired %d offline message(s) older than %v", n, offlineMsgTTL)
+		slog.Info("Expired offline messages", "count", n, "older_than", offlineMsgTTL)
 	}
 	return nil
 }

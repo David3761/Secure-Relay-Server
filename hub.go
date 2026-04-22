@@ -1,6 +1,6 @@
 package main
 
-import "log"
+import "log/slog"
 
 type Hub struct {
 	clients        map[string]*Client
@@ -26,16 +26,16 @@ func (h *Hub) run() {
 		case client := <-h.register:
 			if existing, ok := h.clients[client.pubKey]; ok {
 				close(existing.send)
-				log.Printf("Kicked previous connection for: %s", client.pubKey[:8]+"...")
+				slog.Info("Kicked previous connection", "pubkey", client.pubKey[:8]+"...")
 			}
 			h.clients[client.pubKey] = client
-			log.Printf("User connected: %s", client.pubKey[:8]+"...")
+			slog.Info("User connected", "pubkey", client.pubKey[:8]+"...")
 
 			offlineMsgs, err := getAndDeleteOfflineMessages(client.pubKey)
 			if err != nil {
-				log.Printf("Error fetching offline messages: %v", err)
+				slog.Error("Failed to fetch offline messages", "pubkey", client.pubKey[:8]+"...", "error", err)
 			} else if len(offlineMsgs) > 0 {
-				log.Printf("Delivering %d offline messages to %s", len(offlineMsgs), client.pubKey[:8]+"...")
+				slog.Info("Delivering offline messages", "pubkey", client.pubKey[:8]+"...", "count", len(offlineMsgs))
 				for _, msg := range offlineMsgs {
 					client.send <- msg
 				}
@@ -45,18 +45,17 @@ func (h *Hub) run() {
 			if existing, ok := h.clients[client.pubKey]; ok && existing == client {
 				delete(h.clients, client.pubKey)
 				close(client.send)
-				log.Printf("User disconnected: %s", client.pubKey[:8]+"...")
+				slog.Info("User disconnected", "pubkey", client.pubKey[:8]+"...")
 			}
 
 		case message := <-h.broadcast:
 			recipientClient, isOnline := h.clients[message.RecipientPubKey]
-
 			senderClient, senderOnline := h.clients[message.SenderPubKey]
 
 			if isOnline {
 				select {
 				case recipientClient.send <- message:
-					log.Printf("Routed message instantly to: %s", message.RecipientPubKey[:8]+"...")
+					slog.Debug("Routed message", "to", message.RecipientPubKey[:8]+"...")
 					if senderOnline {
 						senderClient.send <- ChatMessage{
 							Type:      "ack",
@@ -68,10 +67,9 @@ func (h *Hub) run() {
 					delete(h.clients, recipientClient.pubKey)
 				}
 			} else {
-				log.Printf("Recipient offline. Queuing message for: %s", message.RecipientPubKey[:8]+"...")
-				err := saveOfflineMessage(message)
-				if err != nil {
-					log.Printf("CRITICAL: Failed to save offline message: %v", err)
+				slog.Debug("Recipient offline, queuing message", "to", message.RecipientPubKey[:8]+"...")
+				if err := saveOfflineMessage(message); err != nil {
+					slog.Error("Failed to save offline message", "to", message.RecipientPubKey[:8]+"...", "error", err)
 				} else if senderOnline {
 					senderClient.send <- ChatMessage{
 						Type:      "ack",
@@ -98,18 +96,18 @@ func (h *Hub) run() {
 				if isOnline {
 					select {
 					case recipientClient.send <- msg:
-						log.Printf("Routed group message to: %s", recipient.PubKey[:8]+"...")
+						slog.Debug("Routed group message", "to", recipient.PubKey[:8]+"...")
 					default:
 						close(recipientClient.send)
 						delete(h.clients, recipient.PubKey)
 						if err := saveOfflineMessage(msg); err != nil {
-							log.Printf("CRITICAL: Failed to queue group message: %v", err)
+							slog.Error("Failed to queue group message", "to", recipient.PubKey[:8]+"...", "error", err)
 							allQueued = false
 						}
 					}
 				} else {
 					if err := saveOfflineMessage(msg); err != nil {
-						log.Printf("CRITICAL: Failed to queue group message for %s: %v", recipient.PubKey[:8]+"...", err)
+						slog.Error("Failed to queue group message", "to", recipient.PubKey[:8]+"...", "error", err)
 						allQueued = false
 					}
 				}

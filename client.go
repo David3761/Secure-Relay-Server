@@ -6,7 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -48,7 +48,7 @@ func (c *Client) readPump() {
 		_, raw, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
+				slog.Error("Unexpected WebSocket close", "pubkey", c.pubKey[:8]+"...", "error", err)
 			}
 			break
 		}
@@ -66,7 +66,7 @@ func (c *Client) readPump() {
 		case "group_message":
 			var gmsg GroupChatMessage
 			if err := json.Unmarshal(raw, &gmsg); err != nil {
-				log.Printf("Failed to parse group_message: %v", err)
+				slog.Warn("Failed to parse group_message", "error", err)
 				continue
 			}
 			if gmsg.SenderPubKey == c.pubKey {
@@ -75,7 +75,7 @@ func (c *Client) readPump() {
 		default:
 			var msg ChatMessage
 			if err := json.Unmarshal(raw, &msg); err != nil {
-				log.Printf("Failed to parse message: %v", err)
+				slog.Warn("Failed to parse message", "error", err)
 				continue
 			}
 			if msg.SenderPubKey == c.pubKey {
@@ -125,13 +125,6 @@ func isValidHex(s string) bool {
 // authenticate performs a NaCl-box challenge-response handshake over the
 // already-upgraded WebSocket connection to verify that the client holds the
 // private key corresponding to pubKeyHex.
-//
-// Protocol:
-//  1. Server generates an ephemeral X25519 keypair.
-//  2. Server seals a 32-byte random challenge with box.Seal using the client's
-//     public key, so only the holder of the matching private key can open it.
-//  3. Client decrypts and echoes the raw challenge bytes back as hex.
-//  4. Server verifies and resets connection deadlines before returning.
 func authenticate(conn *websocket.Conn, pubKeyHex string) bool {
 	pubKeyBytes, err := hex.DecodeString(pubKeyHex)
 	if err != nil || len(pubKeyBytes) != 32 {
@@ -142,19 +135,19 @@ func authenticate(conn *websocket.Conn, pubKeyHex string) bool {
 
 	ephPub, ephPriv, err := box.GenerateKey(rand.Reader)
 	if err != nil {
-		log.Printf("Failed to generate ephemeral keypair: %v", err)
+		slog.Error("Failed to generate ephemeral keypair", "error", err)
 		return false
 	}
 
 	challenge := make([]byte, 32)
 	if _, err := rand.Read(challenge); err != nil {
-		log.Printf("Failed to generate challenge: %v", err)
+		slog.Error("Failed to generate challenge", "error", err)
 		return false
 	}
 
 	var nonce [24]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
-		log.Printf("Failed to generate nonce: %v", err)
+		slog.Error("Failed to generate nonce", "error", err)
 		return false
 	}
 
@@ -168,7 +161,7 @@ func authenticate(conn *websocket.Conn, pubKeyHex string) bool {
 	}
 	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if err := conn.WriteJSON(challengeMsg); err != nil {
-		log.Printf("Failed to send challenge: %v", err)
+		slog.Warn("Failed to send challenge", "pubkey", pubKeyHex[:8]+"...", "error", err)
 		return false
 	}
 
@@ -178,30 +171,31 @@ func authenticate(conn *websocket.Conn, pubKeyHex string) bool {
 		Solution string `json:"solution"`
 	}
 	if err := conn.ReadJSON(&response); err != nil {
-		log.Printf("Failed to read challenge response: %v", err)
+		slog.Warn("Failed to read challenge response", "pubkey", pubKeyHex[:8]+"...", "error", err)
 		return false
 	}
 
 	if response.Type != "challenge_response" {
-		log.Printf("Expected challenge_response, got %q from %s", response.Type, pubKeyHex[:8]+"...")
+		slog.Warn("Unexpected message type during auth", "pubkey", pubKeyHex[:8]+"...", "got", response.Type)
 		return false
 	}
 
 	solution, err := hex.DecodeString(response.Solution)
 	if err != nil || !bytes.Equal(solution, challenge) {
-		log.Printf("Invalid challenge solution from %s", pubKeyHex[:8]+"...")
+		slog.Warn("Invalid challenge solution", "pubkey", pubKeyHex[:8]+"...")
 		return false
 	}
 
 	conn.SetReadDeadline(time.Time{})
 	conn.SetWriteDeadline(time.Time{})
 
-	log.Printf("Authentication successful for %s", pubKeyHex[:8]+"...")
+	slog.Info("Authentication successful", "pubkey", pubKeyHex[:8]+"...")
 	return true
 }
 
 func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	if !rl.allow(clientIP(r)) {
+		slog.Warn("Rate limit exceeded", "ip", clientIP(r))
 		http.Error(w, "Too many connection attempts", http.StatusTooManyRequests)
 		return
 	}
@@ -214,7 +208,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("Upgrade Error:", err)
+		slog.Warn("WebSocket upgrade failed", "error", err)
 		return
 	}
 
