@@ -24,6 +24,10 @@ func (h *Hub) run() {
 	for {
 		select {
 		case client := <-h.register:
+			if existing, ok := h.clients[client.pubKey]; ok {
+				close(existing.send)
+				log.Printf("Kicked previous connection for: %s", client.pubKey[:8]+"...")
+			}
 			h.clients[client.pubKey] = client
 			log.Printf("User connected: %s", client.pubKey[:8]+"...")
 
@@ -38,7 +42,7 @@ func (h *Hub) run() {
 			}
 
 		case client := <-h.unregister:
-			if _, ok := h.clients[client.pubKey]; ok {
+			if existing, ok := h.clients[client.pubKey]; ok && existing == client {
 				delete(h.clients, client.pubKey)
 				close(client.send)
 				log.Printf("User disconnected: %s", client.pubKey[:8]+"...")

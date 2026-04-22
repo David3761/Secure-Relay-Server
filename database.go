@@ -8,6 +8,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const (
+	offlineMsgTTL      = 7 * 24 * time.Hour
+	offlineMsgMaxCount = 200
+)
+
 var db *pgxpool.Pool
 
 func initDB(connString string) {
@@ -68,6 +73,20 @@ func saveOfflineMessage(msg ChatMessage) error {
 	registerUser(msg.SenderPubKey)
 	registerUser(msg.RecipientPubKey)
 
+	var count int
+	err := db.QueryRow(
+		context.Background(),
+		`SELECT COUNT(*) FROM offline_messages WHERE recipient_pub_key = $1`,
+		msg.RecipientPubKey,
+	).Scan(&count)
+	if err != nil {
+		return err
+	}
+	if count >= offlineMsgMaxCount {
+		log.Printf("Offline queue full (%d) for %s, dropping message", offlineMsgMaxCount, msg.RecipientPubKey[:8]+"...")
+		return nil
+	}
+
 	var groupID *string
 	if msg.GroupID != "" {
 		groupID = &msg.GroupID
@@ -77,8 +96,24 @@ func saveOfflineMessage(msg ChatMessage) error {
 		INSERT INTO offline_messages (message_id, sender_pub_key, recipient_pub_key, encrypted_blob, group_id)
 		VALUES ($1, $2, $3, $4, $5)
 	`
-	_, err := db.Exec(context.Background(), query, msg.MessageID, msg.SenderPubKey, msg.RecipientPubKey, msg.EncryptedBlob, groupID)
+	_, err = db.Exec(context.Background(), query, msg.MessageID, msg.SenderPubKey, msg.RecipientPubKey, msg.EncryptedBlob, groupID)
 	return err
+}
+
+func deleteExpiredMessages() error {
+	cutoff := time.Now().Add(-offlineMsgTTL)
+	result, err := db.Exec(
+		context.Background(),
+		`DELETE FROM offline_messages WHERE created_at < $1`,
+		cutoff,
+	)
+	if err != nil {
+		return err
+	}
+	if n := result.RowsAffected(); n > 0 {
+		log.Printf("Expired %d offline message(s) older than %v", n, offlineMsgTTL)
+	}
+	return nil
 }
 
 func getAndDeleteOfflineMessages(recipientPubKey string) ([]ChatMessage, error) {

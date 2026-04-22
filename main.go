@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -32,8 +33,6 @@ type GroupChatMessage struct {
 }
 
 func main() {
-	// Load .env if present (local dev). In production, env vars are injected
-	// directly by the platform so a missing file is fine.
 	_ = godotenv.Load()
 
 	connString := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
@@ -45,6 +44,17 @@ func main() {
 	)
 
 	initDB(connString)
+
+	rl = newRateLimiter()
+
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		for range ticker.C {
+			if err := deleteExpiredMessages(); err != nil {
+				log.Printf("Failed to expire offline messages: %v", err)
+			}
+		}
+	}()
 
 	hub := newHub()
 	go hub.run()

@@ -1,6 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -8,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/nacl/box"
 )
 
 const (
@@ -108,16 +113,113 @@ func (c *Client) writePump() {
 	}
 }
 
+func isValidHex(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// authenticate performs a NaCl-box challenge-response handshake over the
+// already-upgraded WebSocket connection to verify that the client holds the
+// private key corresponding to pubKeyHex.
+//
+// Protocol:
+//  1. Server generates an ephemeral X25519 keypair.
+//  2. Server seals a 32-byte random challenge with box.Seal using the client's
+//     public key, so only the holder of the matching private key can open it.
+//  3. Client decrypts and echoes the raw challenge bytes back as hex.
+//  4. Server verifies and resets connection deadlines before returning.
+func authenticate(conn *websocket.Conn, pubKeyHex string) bool {
+	pubKeyBytes, err := hex.DecodeString(pubKeyHex)
+	if err != nil || len(pubKeyBytes) != 32 {
+		return false
+	}
+	var clientPubKey [32]byte
+	copy(clientPubKey[:], pubKeyBytes)
+
+	ephPub, ephPriv, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		log.Printf("Failed to generate ephemeral keypair: %v", err)
+		return false
+	}
+
+	challenge := make([]byte, 32)
+	if _, err := rand.Read(challenge); err != nil {
+		log.Printf("Failed to generate challenge: %v", err)
+		return false
+	}
+
+	var nonce [24]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		log.Printf("Failed to generate nonce: %v", err)
+		return false
+	}
+
+	sealed := box.Seal(nil, challenge, &nonce, &clientPubKey, ephPriv)
+
+	challengeMsg := map[string]string{
+		"type":          "challenge",
+		"ephemeral_pub": hex.EncodeToString(ephPub[:]),
+		"nonce":         hex.EncodeToString(nonce[:]),
+		"sealed":        base64.StdEncoding.EncodeToString(sealed),
+	}
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	if err := conn.WriteJSON(challengeMsg); err != nil {
+		log.Printf("Failed to send challenge: %v", err)
+		return false
+	}
+
+	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	var response struct {
+		Type     string `json:"type"`
+		Solution string `json:"solution"`
+	}
+	if err := conn.ReadJSON(&response); err != nil {
+		log.Printf("Failed to read challenge response: %v", err)
+		return false
+	}
+
+	if response.Type != "challenge_response" {
+		log.Printf("Expected challenge_response, got %q from %s", response.Type, pubKeyHex[:8]+"...")
+		return false
+	}
+
+	solution, err := hex.DecodeString(response.Solution)
+	if err != nil || !bytes.Equal(solution, challenge) {
+		log.Printf("Invalid challenge solution from %s", pubKeyHex[:8]+"...")
+		return false
+	}
+
+	conn.SetReadDeadline(time.Time{})
+	conn.SetWriteDeadline(time.Time{})
+
+	log.Printf("Authentication successful for %s", pubKeyHex[:8]+"...")
+	return true
+}
+
 func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	if !rl.allow(clientIP(r)) {
+		http.Error(w, "Too many connection attempts", http.StatusTooManyRequests)
+		return
+	}
+
 	pubKey := r.URL.Query().Get("pubkey")
-	if len(pubKey) != 64 {
-		http.Error(w, "Invalid Public Key Length", http.StatusBadRequest)
+	if len(pubKey) != 64 || !isValidHex(pubKey) {
+		http.Error(w, "Invalid public key", http.StatusBadRequest)
 		return
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("Upgrade Error:", err)
+		return
+	}
+
+	if !authenticate(conn, pubKey) {
+		conn.Close()
 		return
 	}
 
